@@ -49,15 +49,15 @@ class DownscaleFlow(object):
         self.downscale = 1.0/scale
 
     def __call__(self, sample): 
-        if self.downscale!=1 and sample.has_key('flow'):
+        if self.downscale!=1 and sample.__contains__('flow'):
             sample['flow'] = cv2.resize(sample['flow'], 
                 (0, 0), fx=self.downscale, fy=self.downscale, interpolation=cv2.INTER_LINEAR)
 
-        if self.downscale!=1 and sample.has_key('intrinsic'):
+        if self.downscale!=1 and sample.__contains__('intrinsic'):
             sample['intrinsic'] = cv2.resize(sample['intrinsic'], 
                 (0, 0), fx=self.downscale, fy=self.downscale, interpolation=cv2.INTER_LINEAR)
 
-        if self.downscale!=1 and sample.has_key('fmask'):
+        if self.downscale!=1 and sample.__contains__('fmask'):
             sample['fmask'] = cv2.resize(sample['fmask'],
                 (0, 0), fx=self.downscale, fy=self.downscale, interpolation=cv2.INTER_LINEAR)
         return sample
@@ -74,7 +74,7 @@ class CropCenter(object):
             self.size = size
 
     def __call__(self, sample):
-        kks = sample.keys()
+        kks = tuple(sample.keys())
         th, tw = self.size
         h, w = sample[kks[0]].shape[0], sample[kks[0]].shape[1]
         if w == tw and h == th:
@@ -251,6 +251,34 @@ def make_intrinsics_layer(w, h, fx, fy, ox, oy):
     intrinsicLayer = np.stack((ww,hh)).transpose(1,2,0)
 
     return intrinsicLayer
+
+def get_distortion_coef(camera_info):
+    distortion_info = camera_info.D
+    k1 = distortion_info[0]
+    k2 = distortion_info[1]
+    p1 = distortion_info[2]
+    p2 = distortion_info[3]
+    k3 = distortion_info[4]
+    k4 = distortion_info[5]
+    k5 = distortion_info[6]
+    k6 = distortion_info[7]
+    distCoeffs = np.array([k1, k2, p1, p2, k3, k4, k5, k6])
+    return distCoeffs
+
+def get_camera_matrix(camera_info):
+    camera_info = camera_info
+    fx = camera_info.K[0]
+    fy = camera_info.K[4]
+    cx = camera_info.K[2]
+    cy = camera_info.K[5]
+    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+
+def invert_pose(Rt):
+    R_inv = Rt[0:3,0:3].T
+    t = Rt[0:3,3].reshape(-1,1)
+    t_inv = -R_inv @ t
+    Rt0_inv = np.vstack((np.hstack((R_inv, t_inv)), np.array([[0,0,0,1]])))
+    return Rt0_inv
 
 def load_kiiti_intrinsics(filename):
     '''

@@ -41,7 +41,7 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
 from cv_bridge import CvBridge
 
-from Datasets.utils import ToTensor, Compose, CropCenter, DownscaleFlow, make_intrinsics_layer
+from Datasets.utils import ToTensor, Compose, CropCenter, DownscaleFlow, make_intrinsics_layer, get_camera_matrix, get_distortion_coef, invert_pose
 from Datasets.transformation import se2SE, SO2quat
 from TartanVO import TartanVO
 import time
@@ -65,13 +65,16 @@ class TartanVONode(object):
 
         self.pose_pub = rospy.Publisher("tartanvo_pose", PoseStamped, queue_size=10)
         self.odom_pub = rospy.Publisher("tartanvo_odom", Odometry, queue_size=10)
-        rospy.Subscriber('rgb_image', Image, self.handle_img)
-        rospy.Subscriber('cam_info', CameraInfo, self.handle_caminfo)
+        rospy.Subscriber('/crl_rzr/multisense_back/aux/image_color', Image, self.handle_img)
+        rospy.Subscriber('/crl_rzr/multisense_back/aux/image_color/camera_info', CameraInfo, self.handle_caminfo)
         rospy.Subscriber('vo_scale', Float32, self.handle_scale)
 
         self.last_img = None
         self.pose = np.matrix(np.eye(4,4))
         self.scale = 1.0
+
+        self.cameraMatrix = None
+        self.distCoeffs = None
 
     def handle_caminfo(self, msg):
         w = msg.width
@@ -82,6 +85,11 @@ class TartanVONode(object):
         oy = msg.K[5]
         new_intrinsics = [w, h, fx, fy, ox, oy]
         change = [xx!=yy for xx,yy in zip(new_intrinsics, self.cam_intrinsics)]
+
+        if self.cameraMatrix is None:
+            self.cameraMatrix = get_camera_matrix(msg)
+        if self.distCoeffs is None:
+            self.distCoeffs = get_distortion_coef(msg)
         if True in change:
             self.intrinsic = make_intrinsics_layer(w, h, fx, fy, ox, oy)
             self.cam_intrinsics = [w, h, fx, fy, ox, oy]
@@ -92,7 +100,14 @@ class TartanVONode(object):
 
     def handle_img(self, msg):
         starttime = time.time()
-        image_np = self.cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        # image_np = self.cv_bridge.imgmsg_to_cv2(msg, "mono8")
+        image_np = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+
+        # Undistorting the image
+        if self.cameraMatrix is None or self.distCoeffs is None:
+            print('Waiting for messages from camera_info')
+            return
+        image_np = cv2.undistort(image_np, self.cameraMatrix, self.distCoeffs)
 
         if image_np.shape[0] != self.intrinsic.shape[0] or image_np.shape[1] != self.intrinsic.shape[1]:
             print('The intrinsic parameter does not match the image parameter!')
@@ -121,7 +136,7 @@ class TartanVONode(object):
                 print(self.scale)
 
             motion_mat = se2SE(motion)
-            self.pose = self.pose * motion_mat
+            self.pose = self.pose @ invert_pose(motion_mat)
             quat = SO2quat(self.pose[0:3,0:3])
 
             pose_msg.pose.position.x = self.pose[0,3]

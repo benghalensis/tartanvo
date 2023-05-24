@@ -45,7 +45,7 @@ class TartanVO(object):
 
         # load the whole model
         if model_name.endswith('.pkl'):
-            modelname = 'models/' + model_name
+            modelname = '/home/vatsa/catkin_ws/src/tartanvo/models/' + model_name
             self.load_model(self.vonet, modelname)
 
         self.vonet.cuda()
