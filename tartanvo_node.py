@@ -36,10 +36,11 @@ import numpy as np
 
 import rospy
 from sensor_msgs.msg import Image, CameraInfo, Imu
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
 from cv_bridge import CvBridge
+import tf2_ros
 
 from Datasets.utils import ToTensor, Compose, CropCenter, DownscaleFlow, make_intrinsics_layer, get_camera_matrix, get_distortion_coef, invert_pose
 from Datasets.transformation import se2SE, SO2quat
@@ -49,6 +50,7 @@ import time
 import threading
 from collections import deque
 import pdb
+import math
 
 class TartanVONode(object):
     def __init__(self):
@@ -70,9 +72,10 @@ class TartanVONode(object):
         self.pose_pub = rospy.Publisher("tartanvo_pose", PoseStamped, queue_size=10)
         self.odom_pub = rospy.Publisher("tartanvo_odom", Odometry, queue_size=10)
         self.imu_odom_pub = rospy.Publisher("tartanvio_odom", Odometry, queue_size=10)
+        self.tf_pub = tf2_ros.TransformBroadcaster()
         rospy.Subscriber('/crl_rzr/multisense_back/aux/image_color', Image, self.handle_img)
         rospy.Subscriber('/crl_rzr/multisense_back/aux/image_color/camera_info', CameraInfo, self.handle_caminfo)
-        rospy.Subscriber('/crl_rzr/xsens/imu/data', Imu, self.handle_imu, tcp_nodelay=True)
+        rospy.Subscriber('/crl_rzr/xsens/imu/data', Imu, self.handle_imu) # tcp_nodelay=True
         rospy.Subscriber('vo_scale', Float32, self.handle_scale)
 
         self.last_img = None
@@ -86,6 +89,8 @@ class TartanVONode(object):
         self.imu_msg_queue = deque(maxlen=50)
         self.imu_mutex = threading.Lock()
         self.camera_imu_transform = np.eye(4)
+        self.gravity_direction = np.array([[0],[0],[1]])
+        self.max_theta_rad = 0
 
     def handle_caminfo(self, msg):
         w = msg.width
@@ -121,6 +126,10 @@ class TartanVONode(object):
         # Block that thread
         self.imu_mutex.acquire(blocking=True)
 
+        # Queue can be empty
+        if len(self.imu_msg_queue) == 0:
+            return self.gravity_direction
+
         imu_acc = np.zeros(shape=(len(self.imu_msg_queue), 3))
         rospy.loginfo("The length of the imu queue is %d", len(self.imu_msg_queue))
         # Process the messages
@@ -128,19 +137,42 @@ class TartanVONode(object):
             msg = self.imu_msg_queue.popleft()
             imu_acc[i, 0] = msg.linear_acceleration.x
             imu_acc[i, 1] = msg.linear_acceleration.y
-            imu_acc[i, 2] = msg.linear_acceleration.z
+            imu_acc[i, 2] = -msg.linear_acceleration.z
         gravity_direction = imu_acc.mean(axis=0)
-        rospy.loginfo("The length of the imu queue is %d", len(self.imu_msg_queue))
+
         # Release the thread
         self.imu_mutex.release()
 
-        return gravity_direction.reshape(-1,1) / np.linalg.norm(gravity_direction)
+        gravity_direction = gravity_direction.reshape(-1,1) / np.linalg.norm(gravity_direction)
+
+        if gravity_direction.T @ self.gravity_direction < 0:
+            rospy.logerr("Gravity is flipped")
+
+        self.gravity_direction = gravity_direction
+
+        # self.gravity_direction shape is [3,1]
+        return self.gravity_direction
+
+    def get_z_imu(self, ):
+        '''
+        '''
+        gravity_direction = self.get_gravity_vec()
+        print(gravity_direction)
+        pose = np.eye(3)
+
+        # Align the z axis with the -g direction to get the IMU pose
+        R_rot, _ = self.align_pose_with_vec(pose, -gravity_direction, axis=2)
+
+        # Return the z axis of the pose
+        # return shape is (3, 1)
+        return R_rot[0:3,2].reshape(-1,1)
     
     def align_pose_with_vec(self, pose, vec, axis: int):
+        # pose = np.copy(pose)
         z_axis = pose[0:3,2]
         dot_product = (z_axis.T @ vec).item()
-        if dot_product < 0.99:
-            return
+        # if dot_product < 0.99:
+        #     return
 
         # Calculate axis and angle of rotation
         axis = np.cross(z_axis.T, vec.T).flatten()
@@ -156,6 +188,20 @@ class TartanVONode(object):
 
         # Apply rotation
         pose[0:3, 0:3] = R_rot @ pose[0:3, 0:3]
+        return R_rot, pose
+
+    def calculate_pose_change(self, pose1, pose2):
+        t_diff = np.linalg.norm(pose1[0:3,3] - pose2[0:3,3])
+        R_diff = pose1[0:3,0:3].T @ pose2[0:3,0:3]
+
+        trace_R = np.trace(R_diff)  # Sum of diagonal elements
+        theta_rad = np.arccos((trace_R - 1) / 2)
+
+        self.max_theta_rad = max(theta_rad, self.max_theta_rad)
+        print("theta_rad: {}".format(theta_rad))
+
+        if theta_rad > 0.08:
+            rospy.logerr("Delta theta is too high")
 
     def handle_img(self, msg):
         starttime = time.time()
@@ -175,11 +221,10 @@ class TartanVONode(object):
         if self.last_img is not None:
             pose_msg = PoseStamped()
             pose_msg.header.stamp = msg.header.stamp
-            pose_msg.header.frame_id = 'map'
+            pose_msg.header.frame_id = 'crl_rzr/odom'
 
             imu_pose_msg = PoseStamped()
-            imu_pose_msg.header.stamp = msg.header.stamp
-            imu_pose_msg.header.frame_id = 'map'
+            imu_pose_msg.header = pose_msg.header
 
             sample = {'img1': self.last_img, 
                       'img2': image_np, 
@@ -203,11 +248,15 @@ class TartanVONode(object):
             self.pose = self.pose @ invert_pose(motion_mat)
 
             # Convert to IMU frame
+            prev_imu_pose = np.copy(self.imu_pose)
             self.imu_pose = self.imu_pose @ invert_pose(motion_mat)
 
             # Do the gravity alignment
-            gravity_direction = self.get_gravity_vec()
-            self.align_pose_with_vec(self.imu_pose, gravity_direction, 2)
+            z_imu = self.get_z_imu()
+            print(z_imu)
+            _, __ = self.align_pose_with_vec(self.imu_pose, z_imu, 2)
+            print(self.imu_pose)
+            self.calculate_pose_change(prev_imu_pose, self.imu_pose)
 
             quat = SO2quat(self.pose[0:3,0:3])
             imu_quat = SO2quat(self.imu_pose[0:3,0:3])
@@ -224,10 +273,12 @@ class TartanVONode(object):
 
             odom_msg = Odometry()
             odom_msg.header = pose_msg.header
+            odom_msg.child_frame_id = 'crl_rzr/odom_tartanvo'
             odom_msg.pose.pose = pose_msg.pose
 
             imu_odom_msg = Odometry()
             imu_odom_msg.header = pose_msg.header
+            imu_odom_msg.child_frame_id = 'crl_rzr/odom_tartanvo'
             imu_odom_msg.pose.pose.position.x = self.imu_pose[0,3]
             imu_odom_msg.pose.pose.position.y = self.imu_pose[1,3]
             imu_odom_msg.pose.pose.position.z = self.imu_pose[2,3]
@@ -236,6 +287,18 @@ class TartanVONode(object):
             imu_odom_msg.pose.pose.orientation.z = imu_quat[2]
             imu_odom_msg.pose.pose.orientation.w = imu_quat[3]
 
+            t = TransformStamped()
+            t.header = pose_msg.header
+            t.child_frame_id = 'crl_rzr/odom_tartanvo'
+            t.transform.translation.x = self.imu_pose[0,3]
+            t.transform.translation.y = self.imu_pose[1,3]
+            t.transform.translation.z = self.imu_pose[2,3]
+            t.transform.rotation.x = imu_quat[0]
+            t.transform.rotation.y = imu_quat[1]
+            t.transform.rotation.z = imu_quat[2]
+            t.transform.rotation.w = imu_quat[3]
+
+            self.tf_pub.sendTransform(t)
             self.odom_pub.publish(odom_msg)
             self.imu_odom_pub.publish(imu_odom_msg)
 
