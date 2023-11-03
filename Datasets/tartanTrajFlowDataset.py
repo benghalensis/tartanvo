@@ -9,7 +9,7 @@ class TrajFolderDataset(Dataset):
     """scene flow synthetic dataset. """
 
     def __init__(self, imgfolder , posefile = None, transform = None, 
-                    focalx = 320.0, focaly = 320.0, centerx = 320.0, centery = 240.0):
+                    focalx = 320.0, focaly = 320.0, centerx = 320.0, centery = 240.0, skip_n = 0):
         
         files = listdir(imgfolder)
         self.rgbfiles = [(imgfolder +'/'+ ff) for ff in files if (ff.endswith('.png') or ff.endswith('.jpg'))]
@@ -29,21 +29,28 @@ class TrajFolderDataset(Dataset):
         else:
             self.motions = None
 
-        self.N = len(self.rgbfiles) - 1
-
-        # self.N = len(self.lines)
         self.transform = transform
         self.focalx = focalx
         self.focaly = focaly
         self.centerx = centerx
         self.centery = centery
 
+        self.skip_n = skip_n
+
+        self.N = int(len(self.rgbfiles)/self.skip_n) - 1
+
     def __len__(self):
         return self.N
 
     def __getitem__(self, idx):
-        imgfile1 = self.rgbfiles[idx].strip()
-        imgfile2 = self.rgbfiles[idx+1].strip()
+        processed_idx = (self.skip_n + 1) * idx
+        next_processed_idx = (self.skip_n + 1) * (idx + 1)
+
+        if next_processed_idx >= len(self) or processed_idx >= len(self):
+            raise StopIteration
+
+        imgfile1 = self.rgbfiles[processed_idx].strip()
+        imgfile2 = self.rgbfiles[next_processed_idx].strip()
         img1 = cv2.imread(imgfile1)
         img2 = cv2.imread(imgfile2)
 
@@ -59,7 +66,7 @@ class TrajFolderDataset(Dataset):
         if self.motions is None:
             return res
         else:
-            res['motion'] = self.motions[idx]
+            res['motion'] = self.motions[processed_idx]
             return res
 
 

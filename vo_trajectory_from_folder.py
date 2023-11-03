@@ -8,8 +8,8 @@ from TartanVO import TartanVO
 import argparse
 import numpy as np
 import cv2
-from os import mkdir
-from os.path import isdir
+from os import mkdir, makedirs
+from os.path import isdir, join
 
 def get_args():
     parser = argparse.ArgumentParser(description='HRL')
@@ -36,11 +36,14 @@ def get_args():
                         help='test trajectory gt pose file, used for scale calculation, and visualization (default: "")')
     parser.add_argument('--save-flow', action='store_true', default=False,
                         help='save optical flow (default: False)')
+    parser.add_argument('--save-path', type=str, default="",
+                        help='save optical flow (default: False)')
+    parser.add_argument('--skip-n', type=int, default=0,
+                        help='If the value is 0, it skips no frames, if 1 then it skips every other frame, if 2 then it skips 2 and processes 1')
 
     args = parser.parse_args()
 
     return args
-
 
 if __name__ == '__main__':
     args = get_args()
@@ -62,7 +65,7 @@ if __name__ == '__main__':
     transform = Compose([CropCenter((args.image_height, args.image_width)), DownscaleFlow(), ToTensor()])
 
     testDataset = TrajFolderDataset(args.test_dir,  posefile = args.pose_file, transform=transform, 
-                                        focalx=focalx, focaly=focaly, centerx=centerx, centery=centery)
+                                        focalx=focalx, focaly=focaly, centerx=centerx, centery=centery, skip_n=args.skip_n)
     testDataloader = DataLoader(testDataset, batch_size=args.batch_size, 
                                         shuffle=False, num_workers=args.worker_num)
     testDataiter = iter(testDataloader)
@@ -70,10 +73,13 @@ if __name__ == '__main__':
     motionlist = []
     testname = datastr + '_' + args.model_name.split('.')[0]
     if args.save_flow:
-        flowdir = 'results/'+testname+'_flow'
-        if not isdir(flowdir):
-            mkdir(flowdir)
+        if args.save_path == "":
+            flowdir = join(args.test_dir, "flow")
+        else:
+            flowdir = args.save_path
+        makedirs(flowdir, exist_ok=True)
         flowcount = 0
+    
     while True:
         try:
             sample = next(testDataiter)
@@ -86,7 +92,7 @@ if __name__ == '__main__':
         if args.save_flow:
             for k in range(flow.shape[0]):
                 flowk = flow[k].transpose(1,2,0)
-                np.save(flowdir+'/'+str(flowcount).zfill(6)+'.npy',flowk)
+                # np.save(flowdir+'/'+str(flowcount).zfill(6)+'.npy',flowk)
                 flow_vis = visflow(flowk)
                 cv2.imwrite(flowdir+'/'+str(flowcount).zfill(6)+'.png',flow_vis)
                 flowcount += 1
