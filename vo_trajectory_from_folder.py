@@ -10,6 +10,8 @@ import numpy as np
 import cv2
 from os import mkdir, makedirs
 from os.path import isdir, join
+import wandb
+import shutil
 
 def get_args():
     parser = argparse.ArgumentParser(description='HRL')
@@ -32,6 +34,8 @@ def get_args():
                         help='kitti intrinsics file calib.txt (default: )')
     parser.add_argument('--test-dir', default='',
                         help='test trajectory folder where the RGB images are (default: "")')
+    parser.add_argument('--flow-dir', default='',
+                        help='test trajectory folder where the RGB images are (default: "")')
     parser.add_argument('--pose-file', default='',
                         help='test trajectory gt pose file, used for scale calculation, and visualization (default: "")')
     parser.add_argument('--save-flow', action='store_true', default=False,
@@ -45,6 +49,31 @@ def get_args():
 
     return args
 
+
+
+def get_l1_loss(pred, gt):
+    # Scale the pred where the biggest dimension matches the biggest dimension of the gt
+    if gt.shape[0] > gt.shape[1]:
+        scale_factor = gt.shape[0] / pred.shape[0]
+    else:
+        scale_factor = gt.shape[1] / pred.shape[1]
+
+    if scale_factor != 1:
+        new_width = int(pred.shape[1] * scale_factor)
+        new_height = int(pred.shape[0] * scale_factor)
+        new_dimension = (new_width, new_height)
+
+        cv2.resize(pred, new_dimension, interpolation=cv2.INTER_LINEAR)
+
+    return np.mean(np.abs(pred-gt))
+
+"""
+Example to run the script:
+python vo_trajectory_from_folder.py --model-name tartanvo_1914.pkl --batch-size 1 --worker-num 1 
+--test-dir /ocean/projects/cis220039p/shared/tartanair_v2_event/CountryHouseAutoExposure/Data_easy/P000/events/reconstruction 
+--flow-dir /ocean/projects/cis220039p/shared/tartanair_v2_event/CountryHouseAutoExposure/Data_easy/P000/flow_lcam_front 
+--skip-n 1 --save-flow
+"""
 if __name__ == '__main__':
     args = get_args()
 
@@ -64,11 +93,22 @@ if __name__ == '__main__':
 
     transform = Compose([CropCenter((args.image_height, args.image_width)), DownscaleFlow(), ToTensor()])
 
-    testDataset = TrajFolderDataset(args.test_dir,  posefile = args.pose_file, transform=transform, 
+    testDataset = TrajFolderDataset(args.test_dir, flow_folder=args.flow_dir, posefile = args.pose_file, transform=transform, 
                                         focalx=focalx, focaly=focaly, centerx=centerx, centery=centery, skip_n=args.skip_n)
     testDataloader = DataLoader(testDataset, batch_size=args.batch_size, 
                                         shuffle=False, num_workers=args.worker_num)
     testDataiter = iter(testDataloader)
+
+    # start a new wandb run to track this script
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="tartanvo",
+        
+        # track hyperparameters and run metadata
+        config={
+        "test-dir": args.test_dir,
+        }
+    )
 
     motionlist = []
     testname = datastr + '_' + args.model_name.split('.')[0]
@@ -77,7 +117,10 @@ if __name__ == '__main__':
             flowdir = join(args.test_dir, "flow")
         else:
             flowdir = args.save_path
-        makedirs(flowdir, exist_ok=True)
+        # If flowdir exists, delete it and make a new one
+        if isdir(flowdir):
+            shutil.rmtree(flowdir)
+        makedirs(flowdir)
         flowcount = 0
     
     while True:
@@ -89,14 +132,25 @@ if __name__ == '__main__':
         motions, flow = testvo.test_batch(sample)
         motionlist.extend(motions)
 
-        if args.save_flow:
+
+        if (args.save_flow) and ('flow' in sample):
             for k in range(flow.shape[0]):
                 flowk = flow[k].transpose(1,2,0)
-                # np.save(flowdir+'/'+str(flowcount).zfill(6)+'.npy',flowk)
-                flow_vis = visflow(flowk)
-                cv2.imwrite(flowdir+'/'+str(flowcount).zfill(6)+'.png',flow_vis)
-                flowcount += 1
+                gtflowk = sample['flow'][k].numpy().transpose(1,2,0)
 
+                # Calculate loss and log it
+                val_loss = get_l1_loss(flowk, gtflowk)
+                wandb.log({"val_loss": val_loss})
+                
+                # np.save(flowdir+'/'+str(flowcount).zfill(6)+'.npy',flowk)
+                flowk_vis = visflow(flowk)
+                gtflowk_vis = visflow(gtflowk)
+
+                cv2.imwrite(flowdir+'/'+str(flowcount).zfill(6)+'.png', np.hstack((flowk_vis, gtflowk_vis)))
+                flowcount += 1
+    
+    # Close wandb
+    wandb.finish()
     poselist = ses2poses_quat(np.array(motionlist))
 
     # calculate ATE, RPE, KITTI-RPE

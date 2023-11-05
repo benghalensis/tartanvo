@@ -2,13 +2,26 @@ import numpy as np
 import cv2
 from torch.utils.data import Dataset, DataLoader
 from os import listdir
+from os.path import join
 from .transformation import pos_quats2SEs, pose2motion, SEs2ses
 from .utils import make_intrinsics_layer
+
+def flow16to32(flow16):
+    '''
+    flow_32b (float32) [-512.0, 511.984375]
+    flow_16b (uint16) [0 - 65535]
+    flow_32b = (flow16 -32768) / 64
+    '''
+    flow32 = flow16[:,:,:2].astype(np.float32)
+    flow32 = (flow32 - 32768) / 64.0
+
+    mask8 = flow16[:,:,2].astype(np.uint8)
+    return flow32, mask8
 
 class TrajFolderDataset(Dataset):
     """scene flow synthetic dataset. """
 
-    def __init__(self, imgfolder , posefile = None, transform = None, 
+    def __init__(self, imgfolder, flow_folder = None, posefile = None, transform = None, 
                     focalx = 320.0, focaly = 320.0, centerx = 320.0, centery = 240.0, skip_n = 0):
         
         files = listdir(imgfolder)
@@ -28,6 +41,14 @@ class TrajFolderDataset(Dataset):
             assert(len(self.motions) == len(self.rgbfiles)) - 1
         else:
             self.motions = None
+
+        if flow_folder is not None:
+            files = listdir(flow_folder)
+            self.flowfiles = [join(flow_folder, ff) for ff in files if ff.endswith('.png')]
+            self.flowfiles.sort()
+            assert(len(self.flowfiles) - 1 == len(self.rgbfiles)/2 - 1)
+        else:
+            self.flowfiles = None
 
         self.transform = transform
         self.focalx = focalx
@@ -55,6 +76,11 @@ class TrajFolderDataset(Dataset):
         img2 = cv2.imread(imgfile2)
 
         res = {'img1': img1, 'img2': img2 }
+
+        if self.flowfiles is not None:
+            flowfile = self.flowfiles[idx+1]
+            flow16 = cv2.imread(flowfile, cv2.IMREAD_UNCHANGED)
+            res['flow'] = flow16to32(flow16)[0]
 
         h, w, _ = img1.shape
         intrinsicLayer = make_intrinsics_layer(w, h, self.focalx, self.focaly, self.centerx, self.centery)
