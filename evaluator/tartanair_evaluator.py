@@ -5,8 +5,6 @@ import numpy as np
 from .evaluator_base import ATEEvaluator, RPEEvaluator, KittiEvaluator, transform_trajs, quats2SEs
 from os.path import isdir, isfile
 
-# from trajectory_transform import timestamp_associate
-
 class TartanAirEvaluator:
     def __init__(self, scale = False, round=1):
         self.ate_eval = ATEEvaluator()
@@ -17,18 +15,6 @@ class TartanAirEvaluator:
         """
         scale = True: calculate a global scale
         """
-        # load trajectories
-        try:
-            gt_traj = np.loadtxt(gt_traj)
-            est_traj = np.loadtxt(est_traj)
-        except:
-            pass
-
-        if gt_traj.shape[0] != est_traj.shape[0]:
-            raise Exception("POSEFILE_LENGTH_ILLEGAL")
-        if gt_traj.shape[1] != 7 or est_traj.shape[1] != 7:
-            raise Exception("POSEFILE_FORMAT_ILLEGAL")
-
         # transform and scale
         gt_traj_trans, est_traj_trans, s = transform_trajs(gt_traj, est_traj, scale)
         gt_SEs, est_SEs = quats2SEs(gt_traj_trans, est_traj_trans)

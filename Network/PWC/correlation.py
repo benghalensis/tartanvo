@@ -272,7 +272,9 @@ def cupy_kernel(strFunction, objVariables):
 
 # @cupy.util.memoize(for_each_device=True)
 def cupy_launch(strFunction, strKernel):
-	return cupy.cuda.compile_with_cache(strKernel).get_function(strFunction)
+	module = cupy.RawModule(code=strKernel)
+	func = module.get_function(strFunction)
+	return func
 # end
 
 class _FunctionCorrelation(torch.autograd.Function):

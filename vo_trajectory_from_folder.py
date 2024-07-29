@@ -10,7 +10,6 @@ import numpy as np
 import cv2
 from os import mkdir, makedirs
 from os.path import isdir, join
-import wandb
 import shutil
 
 def get_args():
@@ -48,7 +47,6 @@ def get_args():
     args = parser.parse_args()
 
     return args
-
 
 
 def get_l1_loss(pred, gt):
@@ -99,19 +97,20 @@ if __name__ == '__main__':
                                         shuffle=False, num_workers=args.worker_num)
     testDataiter = iter(testDataloader)
 
-    # start a new wandb run to track this script
-    wandb.init(
-        # set the wandb project where this run will be logged
-        project="tartanvo",
-        
-        # track hyperparameters and run metadata
-        config={
-        "test-dir": args.test_dir,
-        }
-    )
+    # Get the trajectory name
+    testname = args.pose_file.split('/')[-1].split('.')[0]
 
-    motionlist = []
-    testname = datastr + '_' + args.model_name.split('.')[0]
+    # Load the ground truth trajectory
+    if args.pose_file.endswith('.txt'):
+        gt_traj = np.loadtxt(args.pose_file)
+        gt_traj_time = None
+    elif args.pose_file.endswith('.tum'):
+        gt_traj_with_time = np.loadtxt(args.pose_file, delimiter=' ', dtype=np.float32)
+        gt_traj = gt_traj_with_time[:, 1:]
+        gt_traj_time = gt_traj_with_time[:, 0].reshape(-1,1)
+    else:
+        raise Exception("Invalid Pose file")
+    
     if args.save_flow:
         if args.save_path == "":
             flowdir = join(args.test_dir, "flow")
@@ -123,6 +122,7 @@ if __name__ == '__main__':
         makedirs(flowdir)
         flowcount = 0
     
+    motionlist = []
     while True:
         try:
             sample = next(testDataiter)
@@ -132,7 +132,6 @@ if __name__ == '__main__':
         motions, flow = testvo.test_batch(sample)
         motionlist.extend(motions)
 
-
         if (args.save_flow) and ('flow' in sample):
             for k in range(flow.shape[0]):
                 flowk = flow[k].transpose(1,2,0)
@@ -140,23 +139,24 @@ if __name__ == '__main__':
 
                 # Calculate loss and log it
                 val_loss = get_l1_loss(flowk, gtflowk)
-                wandb.log({"val_loss": val_loss})
                 
-                # np.save(flowdir+'/'+str(flowcount).zfill(6)+'.npy',flowk)
                 flowk_vis = visflow(flowk)
                 gtflowk_vis = visflow(gtflowk)
 
                 cv2.imwrite(flowdir+'/'+str(flowcount).zfill(6)+'.png', np.hstack((flowk_vis, gtflowk_vis)))
                 flowcount += 1
     
-    # Close wandb
-    wandb.finish()
     poselist = ses2poses_quat(np.array(motionlist))
 
     # calculate ATE, RPE, KITTI-RPE
-    if args.pose_file.endswith('.txt'):
+    if args.pose_file.endswith('.txt') or args.pose_file.endswith('.tum'):
         evaluator = TartanAirEvaluator()
-        results = evaluator.evaluate_one_trajectory(args.pose_file, poselist, scale=True, kittitype=(datastr=='kitti'))
+        if gt_traj.shape[0] != poselist.shape[0]:
+            raise Exception("POSEFILE_LENGTH_ILLEGAL")
+        if gt_traj.shape[1] != 7 or poselist.shape[1] != 7:
+            raise Exception("POSEFILE_FORMAT_ILLEGAL")
+
+        results = evaluator.evaluate_one_trajectory(gt_traj, poselist, scale=True, kittitype=(datastr=='kitti'))
         if datastr=='euroc':
             print("==> ATE: %.4f" %(results['ate_score']))
         else:
@@ -165,5 +165,6 @@ if __name__ == '__main__':
         # save results and visualization
         plot_traj(results['gt_aligned'], results['est_aligned'], vis=False, savefigname='results/'+testname+'.png', title='ATE %.4f' %(results['ate_score']))
         np.savetxt('results/'+testname+'.txt',results['est_aligned'])
+        np.savetxt('results/'+testname+'.tum', np.hstack((gt_traj_time, results['est_aligned']))) if gt_traj_time is not None else None
     else:
         np.savetxt('results/'+testname+'.txt',poselist)

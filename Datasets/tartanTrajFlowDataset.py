@@ -32,7 +32,14 @@ class TrajFolderDataset(Dataset):
         print('Find {} image files in {}'.format(len(self.rgbfiles), imgfolder))
 
         if posefile is not None and posefile!="":
-            poselist = np.loadtxt(posefile).astype(np.float32)
+            # Load the ground truth trajectory
+            if posefile.endswith('.txt'):
+                poselist = np.loadtxt(posefile)
+            elif posefile.endswith('.tum'):
+                poselist_with_time = np.loadtxt(posefile, delimiter=' ', dtype=np.float32)
+                poselist = poselist_with_time[:, 1:]
+            else:
+                raise Exception("Invalid Pose file")
             assert(poselist.shape[1]==7) # position + quaternion
             poses = pos_quats2SEs(poselist)
             self.matrix = pose2motion(poses)
@@ -46,7 +53,7 @@ class TrajFolderDataset(Dataset):
             files = listdir(flow_folder)
             self.flowfiles = [join(flow_folder, ff) for ff in files if ff.endswith('.png')]
             self.flowfiles.sort()
-            assert(len(self.flowfiles) - 1 == len(self.rgbfiles)/2 - 1)
+            assert(len(self.flowfiles) == len(self.rgbfiles) - 1)
         else:
             self.flowfiles = None
 
@@ -58,7 +65,7 @@ class TrajFolderDataset(Dataset):
 
         self.skip_n = skip_n
 
-        self.N = int(len(self.rgbfiles)/self.skip_n) - 1
+        self.N = int(len(self.rgbfiles)/(self.skip_n+1))
 
     def __len__(self):
         return self.N
@@ -78,7 +85,7 @@ class TrajFolderDataset(Dataset):
         res = {'img1': img1, 'img2': img2 }
 
         if self.flowfiles is not None:
-            flowfile = self.flowfiles[idx+1]
+            flowfile = self.flowfiles[idx]
             flow16 = cv2.imread(flowfile, cv2.IMREAD_UNCHANGED)
             res['flow'] = flow16to32(flow16)[0]
 
